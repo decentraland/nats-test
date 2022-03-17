@@ -2,13 +2,6 @@ syntax = "proto3";
 
 option go_package = "github.com/decentraland/nats-test/protocol";
 
-message MessageData {
-  string room = 1;
-  repeated bytes dst = 2;
-  bytes payload = 3;
-  PayloadEncoding encoding = 4;
-}
-
 message ProfileData {
     string profile_version = 1;
     string user_id = 2;
