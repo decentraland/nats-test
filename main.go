@@ -72,18 +72,6 @@ func simulatePeer(ctx *Context, peerID string, islandID string) error {
 	return nil
 }
 
-func natsErrHandler(nc *nats.Conn, sub *nats.Subscription, natsErr error) {
-	fmt.Printf("error: %v\n", natsErr)
-	if natsErr == nats.ErrSlowConsumer {
-		pendingMsgs, _, err := sub.Pending()
-		if err != nil {
-			fmt.Printf("couldn't get pending messages: %v", err)
-			return
-		}
-		fmt.Printf("Falling behind with %d pending messages on subject %q.\n", pendingMsgs, sub.Subject)
-	}
-}
-
 func main() {
 	var url string
 	var totalIslands int
@@ -97,10 +85,30 @@ func main() {
 
 	flag.Parse()
 
-	conn, err := nats.Connect(url, nats.ErrorHandler(natsErrHandler))
+	sigChannel := make(chan os.Signal, 1)
+	signal.Notify(sigChannel, os.Interrupt, syscall.SIGTERM)
+
+	conn, err := nats.Connect(url)
 	if err != nil {
 		log.Fatal(err)
 	}
+	conn.SetErrorHandler(func(nc *nats.Conn, sub *nats.Subscription, natsErr error) {
+		fmt.Printf("error: %v\n", natsErr)
+		if natsErr == nats.ErrSlowConsumer {
+			pendingMsgs, _, err := sub.Pending()
+			if err != nil {
+				fmt.Printf("couldn't get pending messages: %v", err)
+				return
+			}
+			fmt.Printf("Falling behind with %d pending messages on subject %q.\n", pendingMsgs, sub.Subject)
+		}
+	})
+	conn.SetDisconnectErrHandler(func(conn *nats.Conn, err error) {
+		fmt.Println("Server disconnected")
+
+		// hack
+		sigChannel <- syscall.SIGTERM
+	})
 	defer conn.Drain()
 	ctx.Conn = conn
 
@@ -124,9 +132,6 @@ func main() {
 			fmt.Printf("island %s: %d peers\n", island, count)
 		}
 	}
-
-	sigChannel := make(chan os.Signal, 1)
-  signal.Notify(sigChannel, os.Interrupt, syscall.SIGTERM)
 
 	<-sigChannel
 	fmt.Println("Exiting")
