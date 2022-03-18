@@ -3,17 +3,20 @@ package main
 import "log"
 import "fmt"
 import "time"
-import "sync"
 import "flag"
 import "sync/atomic"
 import "github.com/nats-io/nats.go"
 import "github.com/golang/protobuf/proto"
 import "github.com/decentraland/nats-test/protocol"
 
-func sendMessageEvery(wg *sync.WaitGroup, conn *nats.Conn, topic string, data []byte, freq time.Duration) {
-	defer wg.Done()
+type Context struct {
+	Conn  *nats.Conn
+	Debug bool
+}
+
+func sendMessageEvery(ctx *Context, topic string, data []byte, freq time.Duration) {
 	for {
-		conn.Publish(topic, data)
+		ctx.Conn.Publish(topic, data)
 		time.Sleep(freq)
 	}
 }
@@ -25,13 +28,13 @@ func buildPacket(src string, message proto.Message) ([]byte, error) {
 	}
 
 	msg := &protocol.Packet{
-		Src: src,
+		Src:  src,
 		Data: data,
 	}
 	return proto.Marshal(msg)
 }
 
-func simulatePeer(wg *sync.WaitGroup, conn *nats.Conn, peerID string, islandID string) error {
+func simulatePeer(ctx *Context, peerID string, islandID string) error {
 	positionTopic := fmt.Sprintf("messageBus.%s.position", islandID)
 	positionData, err := buildPacket(peerID, &protocol.PositionData{})
 	if err != nil {
@@ -44,22 +47,20 @@ func simulatePeer(wg *sync.WaitGroup, conn *nats.Conn, peerID string, islandID s
 		return err
 	}
 
-	islandTopic := fmt.Sprintf("messageBus.%s.>", islandID)
-
-	wg.Add(3)
-	go sendMessageEvery(wg, conn, positionTopic, positionData, 100 * time.Millisecond)
-	go sendMessageEvery(wg, conn, profileTopic, profileData, 1000 * time.Millisecond)
+	go sendMessageEvery(ctx, positionTopic, positionData, 100*time.Millisecond)
+	go sendMessageEvery(ctx, profileTopic, profileData, 1000*time.Millisecond)
 
 	var messages uint32
-	conn.Subscribe(islandTopic, func(m *nats.Msg) {
+	ctx.Conn.Subscribe(fmt.Sprintf("messageBus.%s.>", islandID), func(m *nats.Msg) {
 		messages = atomic.AddUint32(&messages, 1)
 	})
 
 	go func() {
 		for {
 			m := atomic.LoadUint32(&messages)
-			if m > 0 {
-				fmt.Printf("%s (from %s), %d messages received\n", peerID, islandID, m)
+			atomic.StoreUint32(&messages, 0)
+			if ctx.Debug {
+				fmt.Printf("%s (from %s), %d messages received last minute\n", peerID, islandID, m)
 			}
 			time.Sleep(60 * time.Second)
 		}
@@ -68,48 +69,59 @@ func simulatePeer(wg *sync.WaitGroup, conn *nats.Conn, peerID string, islandID s
 	return nil
 }
 
+func natsErrHandler(nc *nats.Conn, sub *nats.Subscription, natsErr error) {
+	fmt.Printf("error: %v\n", natsErr)
+	if natsErr == nats.ErrSlowConsumer {
+		pendingMsgs, _, err := sub.Pending()
+		if err != nil {
+			fmt.Printf("couldn't get pending messages: %v", err)
+			return
+		}
+		fmt.Printf("Falling behind with %d pending messages on subject %q.\n", pendingMsgs, sub.Subject)
+	}
+}
+
 func main() {
 	var url string
-	var start int
 	var totalIslands int
 	var totalPeers int
-	var debug bool
+	var ctx Context
 
 	flag.StringVar(&url, "url", nats.DefaultURL, "Nats cluster URL")
-	flag.IntVar(&start, "start", 0, "Start from this peer number")
 	flag.IntVar(&totalIslands, "islands", 10, "Total islands to distribute peers between")
 	flag.IntVar(&totalPeers, "peers", 10000, "Total peers to simulate")
-	flag.BoolVar(&debug, "debug", false, "Print debug info")
+	flag.BoolVar(&ctx.Debug, "debug", false, "Print debug info")
 
 	flag.Parse()
 
-	conn, err := nats.Connect(url)
+	conn, err := nats.Connect(url, nats.ErrorHandler(natsErrHandler))
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer conn.Drain()
+	ctx.Conn = conn
 
+	nodeID := time.Now().UTC().UnixMilli()
 	peerCountByIsland := make(map[string]int, totalIslands)
-	var wg sync.WaitGroup
-	for i := start; i < (start + totalPeers); i++ {
-		peerID := fmt.Sprintf("peer%d", i)
-		islandID := fmt.Sprintf("island%d", i % totalIslands)
+	for i := 0; i < totalPeers; i++ {
+		peerID := fmt.Sprintf("%d|peer%d", nodeID, i)
+		islandID := fmt.Sprintf("island%d", i%totalIslands)
 
 		count, _ := peerCountByIsland[islandID]
 		peerCountByIsland[islandID] = count + 1
 
-		if err := simulatePeer(&wg, conn, peerID, islandID); err != nil {
+		if err := simulatePeer(&ctx, peerID, islandID); err != nil {
 			log.Fatal(err)
 		}
 	}
 
-	if debug {
+	if ctx.Debug {
 		fmt.Println("Peers by islands in this SuperNode:")
 		for island, count := range peerCountByIsland {
 			fmt.Printf("island %s: %d peers\n", island, count)
 		}
 	}
 
-
-	wg.Wait()
+	c := make(chan int)
+	<-c
 }
