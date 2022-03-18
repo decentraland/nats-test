@@ -4,7 +4,10 @@ import "log"
 import "fmt"
 import "time"
 import "flag"
+import "os"
+import "os/signal"
 import "sync/atomic"
+import "syscall"
 import "github.com/nats-io/nats.go"
 import "github.com/golang/protobuf/proto"
 import "github.com/decentraland/nats-test/protocol"
@@ -122,6 +125,10 @@ func main() {
 		}
 	}
 
-	c := make(chan int)
-	<-c
+	sigChannel := make(chan os.Signal, 1)
+  signal.Notify(sigChannel, os.Interrupt, syscall.SIGTERM)
+
+	<-sigChannel
+	fmt.Println("Exiting")
+	os.Exit(0)
 }
